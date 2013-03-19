@@ -11,8 +11,9 @@ class MechanizeDocumentCloud
   # might as well use since we're pulling
   # in active_support
   cattr_accessor :site do
-    'https://dev.dcloud.org'
+    'https://dev.dcloud.org/'
   end
+  cattr_accessor :basic_auth
 
   def initialize( login, password )
     page = http.get( self.site + '/login' )
@@ -25,6 +26,9 @@ class MechanizeDocumentCloud
   def http
     @agent ||= Mechanize.new
     @agent.agent.http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+    if basic_auth
+      @agent.add_auth( site, basic_auth[:login], basic_auth[:password])
+    end
     @agent
   end
 
