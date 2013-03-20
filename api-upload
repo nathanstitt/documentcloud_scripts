@@ -1,0 +1,17 @@
+#!/usr/bin/env ruby
+
+require 'net/https'
+
+hostname = "dev.dcloud.org"
+http = Net::HTTP.new(hostname, 443)
+http.use_ssl = true
+http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+request = Net::HTTP::Get.new( '/api/upload' )
+auth = YAML::load(File.read('dev_credentials.yml'))
+request.basic_auth( auth[:login], auth[:password] )
+request.set_form_data( {:file=>'http://alameda-aero.com/aircraft/PiperCherokeeCheckout.docx', :title=>'A random Google doc' } )
+
+resp = http.request( request )
+
+p resp.body
