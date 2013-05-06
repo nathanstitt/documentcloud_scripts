@@ -1,0 +1,26 @@
+#!/usr/bin/env ruby
+
+require 'net/https'
+require 'yaml'
+require 'json'
+
+HOSTNAME = "staging.documentcloud.org" # "dev.dcloud.org"
+
+HTTP = Net::HTTP.new(HOSTNAME, 443)
+HTTP.use_ssl = true
+HTTP.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+AUTH = YAML::load(File.read('dev_credentials.yml'))
+
+def get(url)
+    request = Net::HTTP::Get.new( url )
+    request.basic_auth( AUTH[:login], AUTH[:password] )
+    resp = HTTP.request( request )
+    JSON.parser.new( resp.body ).parse
+end
+
+projects = get('/api/projects.json')['projects']
+
+project_id = projects.first['id']
+
+puts get( "/api/project/#{project_id}.json" )
