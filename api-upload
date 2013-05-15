@@ -4,19 +4,32 @@ require 'active_support/json'
 require 'net/https'
 require 'yaml'
 require 'faker'
+require 'open3'
 hostname = "dev.dcloud.org"
 http = Net::HTTP.new(hostname, 443)
 http.use_ssl = true
 http.verify_mode = OpenSSL::SSL::VERIFY_NONE
 
-(0..20).each do | pass |
+# (0..100).each do | pass |
+#   Open3.popen3( "./lorum-server/text2pdf") do |stdin, stdout, stderr|
+#     stdin.write Faker::Name.name + "\n\n" + Faker::Lorem.paragraphs( 100 ).join("\n\n") + "\n"
+#     stdin.close_write
+#     File.open( "./lorum-server/docs/#{pass}.pdf", 'w' ){| out| out.write stdout.read }
+#   end
+# end
+
+(0..40).each do | pass |
   request = Net::HTTP::Get.new( '/api/upload' )
   auth = YAML::load(File.read('dev_credentials.yml'))
   request.basic_auth( auth[:login], auth[:password] )
-  request.set_form_data( {:file=>'http://lorum.dev/file.pdf', :title=>Faker::Lorem.sentence } )
+
+  request.set_form_data( {
+      :file=>"http://lorum.dev/docs/#{pass}.pdf",
+      :title=>Faker::Lorem.sentence,
+      :priority_rank=>rand(4)
+    } )
 
   resp = http.request( request )
   data = ActiveSupport::JSON.decode( resp.body )
   puts data['id']
-  
 end
