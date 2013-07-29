@@ -4,7 +4,8 @@ require 'net/https'
 require 'yaml'
 require 'json'
 
-HOSTNAME = "staging.documentcloud.org" # "dev.dcloud.org"
+HOSTNAME = "www.documentcloud.org"
+#HOSTNAME = "dev.dcloud.org"
 
 HTTP = Net::HTTP.new(HOSTNAME, 443)
 HTTP.use_ssl = true
@@ -16,6 +17,7 @@ def get(url)
     request = Net::HTTP::Get.new( url )
     request.basic_auth( AUTH[:login], AUTH[:password] )
     resp = HTTP.request( request )
+
     JSON.parser.new( resp.body ).parse
 end
 

@@ -1,0 +1,44 @@
+#!/usr/bin/env ruby
+
+require 'net/https'
+require 'yaml'
+require 'cgi'
+require 'json'
+
+
+HOSTNAME = "www.documentcloud.org"
+http = Net::HTTP.new(HOSTNAME, 443)
+
+http.use_ssl = true
+http.verify_mode = OpenSSL::SSL::VERIFY_PEER # set to: VERIFY_NONE for self-signed
+
+files = ARGV.select{ | file | File.file?(file) }
+
+if files.empty?
+   STDERR.puts "Usage: #{$0} <files>" and exit 1
+end
+
+BOUNDARY = 'NoGemsHaxoredRubyMultipartClient'
+
+files.each do | filename |
+    request = Net::HTTP::Post.new( '/api/upload' )
+    auth = YAML::load(File.read('dev_credentials.yml'))
+
+    request.basic_auth( auth[:login], auth[:password] )
+
+    mime = 'application/octet-stream' # irrelevant since api/upload doesn't inspect..
+    request.set_content_type( "multipart/form-data", { "boundary" => BOUNDARY })
+    title = File.basename(filename,'.*')
+    request.body = \
+        "--#{BOUNDARY}\r\n" +
+        "Content-Disposition: form-data; name=\"title\"\r\n\r\n#{title}\r\n" +
+        "--#{BOUNDARY}\r\n" +
+        "Content-Disposition: form-data; name=\"file\"; filename=\"#{filename}\"\r\n" + "Content-Transfer-Encoding: binary\r\n" + "Content-Type: #{mime}\r\n\r\n" + File.read(filename) + "\r\n" +
+        "--#{BOUNDARY}--\r\n"
+
+    resp = http.request( request )
+
+    data = JSON.parse( resp.body )
+
+    puts sprintf( '%20s => %s', title, data['id'] )
+end

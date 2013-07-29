@@ -1,10 +1,10 @@
 #!/usr/bin/env ruby
 
-require 'active_support/json'
-require 'net/https'
-require 'yaml'
-require 'faker'
-require 'open3'
+# require 'active_support/json'
+# require 'net/https'
+# require 'yaml'
+# require 'faker'
+# require 'open3'
 hostname = "dev.dcloud.org"
 http = Net::HTTP.new(hostname, 443)
 http.use_ssl = true
@@ -18,7 +18,7 @@ http.verify_mode = OpenSSL::SSL::VERIFY_NONE
 #   end
 # end
 
-(0..40).each do | pass |
+(0..1).each do | pass |
   request = Net::HTTP::Get.new( '/api/upload' )
   auth = YAML::load(File.read('dev_credentials.yml'))
   request.basic_auth( auth[:login], auth[:password] )
