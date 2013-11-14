@@ -1,0 +1,8 @@
+#!/usr/bin/env ruby
+
+%w{ 5.0 4.0 3.5 2.0 1.0 0.5 }.each do | time |
+    pid = fork do
+        exec "./benchmark -s staging.documentcloud.org -d 805322,805321,805320 -o staging-#{time}.png -a staging-old -u ubuntu --notes #{time}"
+    end
+    Process.wait(pid)
+end

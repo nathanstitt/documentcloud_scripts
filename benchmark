@@ -19,8 +19,8 @@ opts = OptionParser.new do |opts|
   opts.on( "-u", "--user USER", "User to ssh as") do |opt_val|
     options[:ssh_user]  = opt_val
   end
-  opts.on("-d", "--document DOCUMENT ID", "Document ID to request") do |opt_val|
-    options[:doc] = opt_val
+  opts.on("-d", "--documents DOCUMENT ID", "Document ID to request") do |opt_val|
+    options[:docs] = opt_val
   end
   opts.on("-o", "--output OUTPUT", "File to save graph") do |opt_val|
     options[:output] = opt_val
@@ -37,7 +37,7 @@ opts = OptionParser.new do |opts|
 end
 
 opts.parse!
-unless ( blank = [:host,:doc,:output,:abhost,:ssh_user].select{ |param| options[param].nil? } ).empty?
+unless ( blank = [:host,:docs,:output,:abhost,:ssh_user].select{ |param| options[param].nil? } ).empty?
     STDERR.puts "Missing options #{blank.join(', ')}"
     STDERR.puts opts
     exit
@@ -47,7 +47,7 @@ end
 
 class Benchmark
 
-  attr_reader :options, :rng, :dc, :doc
+  attr_reader :options, :rng, :dc, :docs
 
   def initialize( opts )
     @options = Hashie::Mash.new( DEF.merge( opts ) )
@@ -56,7 +56,9 @@ class Benchmark
     @dc=MechanizeDocumentCloud.new( auth[:login], auth[:password] )
 
     @rng=Random.new(1234)
-    @doc = dc.get("/documents/#{options.doc}.json")
+    @docs = options.docs.split(',').map do | doc_id |
+      dc.get("/documents/#{doc_id}.json")
+    end
   end
 
   def run
@@ -64,27 +66,18 @@ class Benchmark
 
     Dir.mktmpdir do |dir|
 
-      ab_pid = fork do
-        Net::SSH.start(options.abhost, options.ssh_user ) do | ssh |
-          cmd = "ab -c #{options.concurrency} -t #{options.duration} -g /tmp/ab.dat " +
-            "'https://#{options.host}/documents/#{doc.id}.js'"
-          ssh.exec!(cmd) do |channel, stream, data|
-            channel.on_data do |c, data|
-              print data
-            end
-          end
-
-        end
+      ab_pids = docs.map do | doc |
+        fork { start_ab( doc ) }
       end
 
       note_num = 0
       note_pids = []
       while true do
         begin
-          Process.getpgid( ab_pid )
+          Process.getpgid( ab_pids.first ) # we'll stop making notes when first ab exits
           note_num +=1
           note_pids << fork do
-            post_note(note_num)
+            post_note( docs.sample, note_num)
             puts "made note # #{note_num}"
           end
           sleep options.note_seconds
@@ -94,32 +87,45 @@ class Benchmark
       end
       Process.waitall
 
-      Net::SFTP.start(options.abhost, options.ssh_user ) do | sftp |
-        sftp.download!("/tmp/ab.dat", "#{dir}/ab.dat")
+      docs.each do | doc |
+        Net::SFTP.start(options.abhost, options.ssh_user ) do | sftp |
+          sftp.download!("/tmp/ab-#{doc.id}.dat", "#{dir}/ab-#{doc.id}.dat")
+        end
       end
-
-      # Process.wait( notes_pid )
-      # puts "notes child exited with #{$?}, pid = #{notes_pid}"
 
       massage_data( dir )
       make_chart(dir)
     end
   end
 
+
+  def start_ab( doc )
+    Net::SSH.start(options.abhost, options.ssh_user ) do | ssh |
+      cmd = "ab -c #{options.concurrency} -t #{options.duration} -g /tmp/ab-#{doc.id}.dat " +
+        "'https://#{options.host}/documents/#{doc.id}.js'"
+      ssh.exec!(cmd)
+    end
+  end
+
+
   def clean_notes
-    puts "cleaning old notes"
-    dc.get("/documents/#{options.doc}/annotations" ).each do | note |
-      dc.delete("/documents/#{options.doc}/annotations/#{note.id}")
+    docs.each do | doc |
+      puts "cleaning old notes from #{doc.id}"
+      dc.get("/documents/#{doc.id}/annotations" ).each do | note |
+        dc.delete("/documents/#{doc.id}/annotations/#{note.id}")
+      end
     end
   end
 
 
   def massage_data(dir)
     seconds = Hash.new{|h, k| h[k] = []}
-    File.open( "#{dir}/ab.dat" ) do | ab |
-      ab.each_line do | line |
-        (dt,secs,ctime,dtime,ttime,wait) = line.split("\t")
-        seconds[ secs.to_i ] << ttime.to_i if secs.to_i > 0
+    docs.each do | doc |
+      File.open( "#{dir}/ab-#{doc.id}.dat" ) do | ab |
+        ab.each_line do | line |
+          (dt,secs,ctime,dtime,ttime,wait) = line.split("\t")
+          seconds[ secs.to_i ] << ttime.to_i if secs.to_i > 0
+        end
       end
     end
     File.open("#{dir}/ab.dat",'w') do | out |
@@ -136,7 +142,7 @@ class Benchmark
     cmd = <<-EOS .gsub(/^ {2}/, '')
        set terminal png giant
        set output
-       set title "Duration #{options.duration}, #{options.note_seconds.round(1)} Notes/Sec"
+       set title "Docs #{options.docs}, #{options.duration} secs, #{options.note_seconds.round(1)} between notes"
        set xlabel 'seconds'
        set ylabel 'ms'
        plot "#{dir}/ab.dat" using 1:2:3:4 with yerrorbars title ''
@@ -146,10 +152,10 @@ class Benchmark
     return s.success? ? image : false
   end
 
-  def post_note(note_num)
+  def post_note(doc, note_num)
     rand_location = (0..3).map{|n| ( rng.rand * 850).to_i}.join(',')
-    dc.post("/documents/#{options.doc}/annotations", {
-        :page_number=> rand( @doc.pages ), :access=>'public',
+    dc.post("/documents/#{doc.id}/annotations", {
+        :page_number=> rand( doc.pages ), :access=>'public',
         :location=> rand_location, :content=>Faker::Lorem.sentences.join(' '),
         :title=>"#{note_num}-#{Faker::Company.catch_phrase}"
       } )
