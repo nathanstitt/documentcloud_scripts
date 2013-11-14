@@ -29,7 +29,7 @@ opts = OptionParser.new do |opts|
     options[:duration] = opt_val.to_i
   end
   opts.on( "--notes NOTESECONDS", "Make a note every X seconds (default #{DEF.note_seconds})") do |opt_val|
-    options[:note_seconds] = opt_val.to_i
+    options[:note_seconds] = opt_val.to_f
   end
   opts.on( "--concurrency COUNT", "Number of concurrent access (default #{DEF.concurrency})") do |opt_val|
     options[:concurrency]  = opt_val.to_i
@@ -64,7 +64,7 @@ class Benchmark
 
     Dir.mktmpdir do |dir|
 
-      ab_pid = fork do |ssh|
+      ab_pid = fork do
         Net::SSH.start(options.abhost, options.ssh_user ) do | ssh |
           cmd = "ab -c #{options.concurrency} -t #{options.duration} -g /tmp/ab.dat " +
             "'https://#{options.host}/documents/#{doc.id}.js'"
@@ -75,19 +75,28 @@ class Benchmark
           end
 
         end
-        Net::SFTP.start(options.abhost, options.ssh_user ) do | sftp |
-          sftp.download!("/tmp/ab.dat", "#{dir}/ab.dat")
+      end
+
+      note_num = 0
+      note_pids = []
+      while true do
+        begin
+          Process.getpgid( ab_pid )
+          note_num +=1
+          note_pids << fork do
+            post_note(note_num)
+            puts "made note # #{note_num}"
+          end
+          sleep options.note_seconds
+        rescue Errno::ESRCH
+          break
         end
       end
+      Process.waitall
 
-      0.step(options.duration, options.note_seconds ) do | note_num |
-        post_note(note_num)
-        sleep options.note_seconds
+      Net::SFTP.start(options.abhost, options.ssh_user ) do | sftp |
+        sftp.download!("/tmp/ab.dat", "#{dir}/ab.dat")
       end
-
-
-      Process.wait( ab_pid )
-      puts "apache bench child exited with #{$?}, pid = #{ab_pid}"
 
       # Process.wait( notes_pid )
       # puts "notes child exited with #{$?}, pid = #{notes_pid}"
@@ -98,11 +107,11 @@ class Benchmark
   end
 
   def clean_notes
+    puts "cleaning old notes"
     dc.get("/documents/#{options.doc}/annotations" ).each do | note |
       dc.delete("/documents/#{options.doc}/annotations/#{note.id}")
     end
   end
-
 
 
   def massage_data(dir)
@@ -123,10 +132,11 @@ class Benchmark
   end
 
   def generate_graph( dir )
+    #       set size 1.0,0.5
     cmd = <<-EOS .gsub(/^ {2}/, '')
        set terminal png giant
        set output
-       set size 1,0.7
+       set title "Duration #{options.duration}, #{options.note_seconds.round(1)} Notes/Sec"
        set xlabel 'seconds'
        set ylabel 'ms'
        plot "#{dir}/ab.dat" using 1:2:3:4 with yerrorbars title ''
@@ -143,7 +153,6 @@ class Benchmark
         :location=> rand_location, :content=>Faker::Lorem.sentences.join(' '),
         :title=>"#{note_num}-#{Faker::Company.catch_phrase}"
       } )
-    puts "made note # #{note_num}"
   end
 
   def make_chart(dir)
