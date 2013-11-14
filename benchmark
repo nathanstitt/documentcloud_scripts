@@ -1,0 +1,159 @@
+#!/usr/bin/env ruby
+
+require 'optparse'
+require_relative 'mechanize_document_cloud'
+require 'faker'
+require 'open3'
+require 'net/ssh'
+require 'net/sftp'
+DEF = Hashie::Mash.new({ duration: 65, note_seconds: 10, concurrency: 5 })
+options = {}
+opts = OptionParser.new do |opts|
+  opts.banner = "Usage: #{$0} [options]"
+  opts.on("-s", "--server SERVER", "Host to benchmark") do |opt_val|
+    options[:host] = opt_val
+  end
+  opts.on("-a", "--abserver SERVER", "Host to run ab on") do |opt_val|
+    options[:abhost] = opt_val
+  end
+  opts.on( "-u", "--user USER", "User to ssh as") do |opt_val|
+    options[:ssh_user]  = opt_val
+  end
+  opts.on("-d", "--document DOCUMENT ID", "Document ID to request") do |opt_val|
+    options[:doc] = opt_val
+  end
+  opts.on("-o", "--output OUTPUT", "File to save graph") do |opt_val|
+    options[:output] = opt_val
+  end
+  opts.on( "--duration NUM_SECONDS", "Number of seconds to run (default #{DEF.seconds})") do |opt_val|
+    options[:duration] = opt_val.to_i
+  end
+  opts.on( "--notes NOTESECONDS", "Make a note every X seconds (default #{DEF.note_seconds})") do |opt_val|
+    options[:note_seconds] = opt_val.to_i
+  end
+  opts.on( "--concurrency COUNT", "Number of concurrent access (default #{DEF.concurrency})") do |opt_val|
+    options[:concurrency]  = opt_val.to_i
+  end
+end
+
+opts.parse!
+unless ( blank = [:host,:doc,:output,:abhost,:ssh_user].select{ |param| options[param].nil? } ).empty?
+    STDERR.puts "Missing options #{blank.join(', ')}"
+    STDERR.puts opts
+    exit
+end
+
+
+
+class Benchmark
+
+  attr_reader :options, :rng, :dc, :doc
+
+  def initialize( opts )
+    @options = Hashie::Mash.new( DEF.merge( opts ) )
+    auth = YAML::load(File.read('dev_credentials.yml'))
+    MechanizeDocumentCloud.site = "https://#{options.host}/"
+    @dc=MechanizeDocumentCloud.new( auth[:login], auth[:password] )
+
+    @rng=Random.new(1234)
+    @doc = dc.get("/documents/#{options.doc}.json")
+  end
+
+  def run
+    clean_notes
+
+    Dir.mktmpdir do |dir|
+
+      ab_pid = fork do |ssh|
+        Net::SSH.start(options.abhost, options.ssh_user ) do | ssh |
+          cmd = "ab -c #{options.concurrency} -t #{options.duration} -g /tmp/ab.dat " +
+            "'https://#{options.host}/documents/#{doc.id}.js'"
+          ssh.exec!(cmd) do |channel, stream, data|
+            channel.on_data do |c, data|
+              print data
+            end
+          end
+
+        end
+        Net::SFTP.start(options.abhost, options.ssh_user ) do | sftp |
+          sftp.download!("/tmp/ab.dat", "#{dir}/ab.dat")
+        end
+      end
+
+      0.step(options.duration, options.note_seconds ) do | note_num |
+        post_note(note_num)
+        sleep options.note_seconds
+      end
+
+
+      Process.wait( ab_pid )
+      puts "apache bench child exited with #{$?}, pid = #{ab_pid}"
+
+      # Process.wait( notes_pid )
+      # puts "notes child exited with #{$?}, pid = #{notes_pid}"
+
+      massage_data( dir )
+      make_chart(dir)
+    end
+  end
+
+  def clean_notes
+    dc.get("/documents/#{options.doc}/annotations" ).each do | note |
+      dc.delete("/documents/#{options.doc}/annotations/#{note.id}")
+    end
+  end
+
+
+
+  def massage_data(dir)
+    seconds = Hash.new{|h, k| h[k] = []}
+    File.open( "#{dir}/ab.dat" ) do | ab |
+      ab.each_line do | line |
+        (dt,secs,ctime,dtime,ttime,wait) = line.split("\t")
+        seconds[ secs.to_i ] << ttime.to_i if secs.to_i > 0
+      end
+    end
+    File.open("#{dir}/ab.dat",'w') do | out |
+      min = seconds.keys.min
+      seconds.keys.sort.each do | sec |
+        results = seconds[sec]
+        out.write "%i %d %i %i\n" % ( [ sec-min, results.reduce(:+).to_f / results.size ] + results.minmax )
+      end
+    end
+  end
+
+  def generate_graph( dir )
+    cmd = <<-EOS .gsub(/^ {2}/, '')
+       set terminal png giant
+       set output
+       set size 1,0.7
+       set xlabel 'seconds'
+       set ylabel 'ms'
+       plot "#{dir}/ab.dat" using 1:2:3:4 with yerrorbars title ''
+       exit
+    EOS
+    image, s = Open3.capture2("gnuplot", :stdin_data=>cmd, :binmode=>true)
+    return s.success? ? image : false
+  end
+
+  def post_note(note_num)
+    rand_location = (0..3).map{|n| ( rng.rand * 850).to_i}.join(',')
+    dc.post("/documents/#{options.doc}/annotations", {
+        :page_number=> rand( @doc.pages ), :access=>'public',
+        :location=> rand_location, :content=>Faker::Lorem.sentences.join(' '),
+        :title=>"#{note_num}-#{Faker::Company.catch_phrase}"
+      } )
+    puts "made note # #{note_num}"
+  end
+
+  def make_chart(dir)
+    if image = generate_graph( dir )
+      File.open("#{options.output}",'w'){ |f| f.write image }
+      puts "Saved image to #{options.output}"
+    end
+  end
+
+end
+
+
+Benchmark.new( options ).run
