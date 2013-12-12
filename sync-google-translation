@@ -1,0 +1,35 @@
+#!/usr/bin/env ruby
+
+require "rubygems"
+require "google_drive"
+require 'highline'
+
+
+def upload_to_sheet( sheet, strings )
+    row = 2
+    strings.each do | key, values |
+        sheet[ row, 1 ] = key
+        [ *values ].each do | value |
+            sheet[ row, 2 ] = value
+            row+=1
+        end
+    end
+    sheet.save()
+end
+
+
+english = YAML.load_file( "./config/locales/eng.yml" )
+if ARGV.length != 1
+  STDERR.puts "usage: #{$0} <login>"
+  exit 1
+end
+
+password = HighLine.new.ask("Password for #{ARGV[0]}: ") { |q| q.echo = false }
+
+session = GoogleDrive.login( ARGV[0], password )
+
+xls = session.spreadsheet_by_key '0AiY4dewFeJcNdGtHM1JRcUh6eW54TW1Peld1TjZoSnc'
+
+upload_to_sheet( xls.worksheets[0], english['common'] )
+upload_to_sheet( xls.worksheets[1], english['workspace'] )
+upload_to_sheet( xls.worksheets[2], english['viewer'] )
