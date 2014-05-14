@@ -1,0 +1,33 @@
+#!/usr/bin/ruby
+
+require_relative 'servers'
+amazon = Servers.new
+
+ENVIRONMENT = 'production'
+
+PROVISION = <<EOS
+cd secrets
+git pull
+cd ..
+git checkout master
+git pull
+bundle install
+bundle exec rake #{ENVIRONMENT} crowd:node:start
+EOS
+
+ENSURE_RUNNING = <<EOS
+[ -f tmp/pids/node.pid ] && [ -d /proc/`cat tmp/pids/node.pid` ] || { echo 'Not running'; bundle exec rake #{ENVIRONMENT} crowd:node:start; }  >&2
+EOS
+
+
+nodes = amazon.launch(5)
+nodes.execute PROVISION
+
+workers = amazon.workers#(2..3)
+
+workers.manual_control
+
+# workers.execute PROVISION
+#workers.execute ENSURE_RUNNING
+
+puts amazon.workers.address_table
