@@ -46,7 +46,7 @@ class InstanceCollection
     map do |i| sprintf("%-10s %-20s %s",
       i.name,
       i.ec2.private_dns_name.gsub(/.ec2.internal$/,''),
-      i.address.gsub(/.compute-1.amazonaws.com$/,'')
+      i.address
     )
     end
   end
@@ -162,7 +162,7 @@ class Servers
         :count             => count,
         :security_groups   => ['default'],
         :key_name          => 'DocumentCloud 2014-04-12',
-        :instance_type     => 'c1.medium',
+        :instance_type     => 'c3.large',
         :availability_zone => DC::CONFIG['aws_zone']
       })
     new_instances = @ec2.instances.create(options)
