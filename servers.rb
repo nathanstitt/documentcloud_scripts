@@ -12,7 +12,9 @@ class Node < Struct.new(:name, :address, :ec2)
   def number
     name[/\d+$/,0].to_i
   end
-
+  def reserved?
+    number <= 4
+  end
   def ssh_open?
     Timeout::timeout(1) do
       begin
@@ -33,6 +35,7 @@ class InstanceCollection
 
   def initialize(nodes)
     @nodes=nodes
+    @hl = HighLine.new
   end
 
   def ssh_key
@@ -40,20 +43,27 @@ class InstanceCollection
   end
 
   def address_table
-    map{ |i| sprintf("%-10s %s", i.name, i.address.gsub(/.compute-1.amazonaws.com$/,'') ) }
+    map do |i| sprintf("%-10s %-20s %s",
+      i.name,
+      i.ec2.private_dns_name.gsub(/.ec2.internal$/,''),
+      i.address.gsub(/.compute-1.amazonaws.com$/,'')
+    )
+    end
   end
 
   def each(&block)
     @nodes.each(&block)
   end
 
-  def colorize(color_code,str)
-    "\e[#{color_code}m#{str}\e[0m"
-  end
-
-  def log(msg)
-    # magenta
-    puts colorize(35,msg)
+  def terminate!
+    list = "\n\t#{address_table.join("\n\t")}"
+    if any? {|i| i.reserved? }
+      @hl.say(@hl.color "Nope!#{list}\nare protected!", HighLine::RED)
+      return
+    end
+    if @hl.agree("This will terminate:#{list}\nAre you sure? (Y/N)", true)
+      each{ |i| i.ec2.terminate }
+    end
   end
 
   def execute(cmd)
@@ -68,13 +78,12 @@ class InstanceCollection
 
         EOS
           ssh.exec!(prefix + cmd) do | channel, stream, data |
-            # green or red
-            prefix = colorize( stream == :stdout ? 32 : 31, node.name )
+            color = ( stream == :stdout ? HighLine::GREEN : HighLine::RED )
             data.each_line do | line |
-              puts "%-30s%s" % [prefix, line]
+              @hl.say(@hl.color( "%-15s%s" % [node.name, line.chomp], color ) )
             end
           end
-          log "#{node.name} exited"
+          @hl.say(@hl.color "#{node.name} complete", HighLine::MAGENTA)
         end
       end
     end
@@ -142,6 +151,7 @@ class Servers
   end
 
   def workers(range=false)
+    range = (range..range) if range.is_a?(Fixnum)
     instances { |i| i.name=~/worker/ && ( range ? range.include?(i.number) : true) }
   end
 
