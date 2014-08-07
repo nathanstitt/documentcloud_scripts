@@ -5,13 +5,27 @@ amazon = Servers.new
 
 ENVIRONMENT = 'production'
 
-PROVISION = <<EOS
+REFRESH = <<EOS
 cd secrets
 git pull
 cd ..
 git checkout master
 git pull
+cd ~/documentcloud
 bundle install
+EOS
+
+CHECK_RUBY = <<EOS
+strings /proc/`pgrep -f thin`/exe|grep ruby
+EOS
+
+CULL =  <<EOS
+#{REFRESH}
+bundle exec rake #{ENVIRONMENT} crowd:node:cull ; bundle exec rake #{ENVIRONMENT} crowd:node:start
+EOS
+
+PROVISION = <<EOS
+#{REFRESH}
 bundle exec rake #{ENVIRONMENT} crowd:node:start
 EOS
 
@@ -19,15 +33,21 @@ ENSURE_RUNNING = <<EOS
 [ -f tmp/pids/node.pid ] && [ -d /proc/`cat tmp/pids/node.pid` ] || { echo 'Not running'; bundle exec rake #{ENVIRONMENT} crowd:node:start; }  >&2
 EOS
 
+DOC_HITS = <<EOS
+org=Organization.find(140)
+urls=RemoteUrl
+   .where(document_id:org.documents.published.ids)
+   .group(:date_recorded,:document_id).select('date_recorded','document_id','sum(hits) as hits')
+puts "Date\tHits\tURL"
+print urls.map{|r| [r.date_recorded.strftime("%Y-%m-%d"), r.hits, r.document.canonical_url].join("\t") }.join("\n")
+EOS
 
-nodes = amazon.launch(5)
-nodes.execute PROVISION
-
-workers = amazon.workers#(2..3)
-
-workers.manual_control
-
-# workers.execute PROVISION
-#workers.execute ENSURE_RUNNING
-
-puts amazon.workers.address_table
+#amazon.workers(16..18).terminate!
+#nodes = amazon.launch(1, script:PROVISION)
+#nodes.execute PROVISION
+#amazon.workers.manual_control 'tail -f log/node.log'
+#amazon.workers.execute ENSURE_RUNNING
+#amazon.workers(20..30).manual_control
+#puts amazon.workers.jobs
+#amazon.workers(5..7).execute(CULL)
+#puts amazon.workers.address_table

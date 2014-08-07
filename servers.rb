@@ -15,18 +15,6 @@ class Node < Struct.new(:name, :address, :ec2)
   def reserved?
     number <= 4
   end
-  def ssh_open?
-    Timeout::timeout(1) do
-      begin
-        TCPSocket.new(address, 22).close
-        true
-      rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH
-        false
-      end
-    end
-  rescue Timeout::Error
-    false
-  end
 
 end
 
@@ -51,8 +39,35 @@ class InstanceCollection
     end
   end
 
-  def each(&block)
-    @nodes.each(&block)
+  JobResult = Struct.new(:node,:pid,:run_time,:display_time,:action)
+
+  def each
+    @nodes.each{ |n| yield n }
+  end
+
+  def jobs
+    cmd="ps -o pid,etime,cmd --no-headers --ppid `cat tmp/pids/node.pid`"
+    results = []
+    execute_on_each(cmd) do |line, success, node|
+      match=line.match(/\s*(\d+)\s*(\S+)\s(.*)/)
+      if ! match
+        @hl.say( @hl.color "#{line} failed to match", HighLine::RED)
+        next
+      end
+      tp = match[2].split(':').map(&:to_i)
+      time = case tp.length
+             when 3 then tp[0].hours   + tp[1].minutes   + tp[2].seconds
+             when 2 then tp[0].minutes + tp[1].seconds
+             else tp[0].seconds
+             end
+      if match[2]=~/(\d+)-/
+        time+=$1.to_i.days
+      end
+      results << JobResult.new(node, match[1], time, match[2], match[3])
+    end
+    results.sort{ |a,b| a.run_time <=> b.run_time }.map do | r |
+      sprintf("%-10s %-15s %8s %s",r.node.name, r.display_time, r.pid, r.action)
+    end
   end
 
   def terminate!
@@ -67,6 +82,13 @@ class InstanceCollection
   end
 
   def execute(cmd)
+    execute_on_each(cmd) do |line, success, node|
+      color = ( success ? HighLine::GREEN : HighLine::RED )
+      @hl.say(@hl.color( "%-15s%s" % [node.name, line.chomp], color ) )
+    end
+  end
+
+  def execute_on_each(cmd)
     threads = []
     each do | node |
       threads << Thread.new do
@@ -76,14 +98,12 @@ class InstanceCollection
           source /usr/local/share/chruby/auto.sh
           cd ~/documentcloud
 
-        EOS
+          EOS
           ssh.exec!(prefix + cmd) do | channel, stream, data |
-            color = ( stream == :stdout ? HighLine::GREEN : HighLine::RED )
             data.each_line do | line |
-              @hl.say(@hl.color( "%-15s%s" % [node.name, line.chomp], color ) )
+              yield line, (channel==:stdout), node
             end
           end
-          @hl.say(@hl.color "#{node.name} complete", HighLine::MAGENTA)
         end
       end
     end
@@ -126,14 +146,23 @@ end
 
 class Servers
   # we should never operate on these
-  BLACKLIST=Regexp.new('^(app|solr|db)')
-
+  BLACKLIST  = Regexp.new('^(app|solr|db)')
+  CACHE_FILE = Pathname.new("/tmp/.aws-workers")
   def initialize
     @ec2 = AWS::EC2.new
     @instances = []
-    @ec2.instances
+    if CACHE_FILE.exist? && CACHE_FILE.mtime > 3.hours.ago
+      @instances = Marshal.load(CACHE_FILE.read)
+    else
+      @ec2.instances
         .reject { |i| i.status != :running || i.tags["Name"].blank? || i.tags["Name"].match(BLACKLIST) }
         .each{ |instance| add_node(instance) }
+      cache_workers
+    end
+  end
+
+  def cache_workers
+#    CACHE_FILE.write Marshal.dump(@instances)
   end
 
   def add_node(instance)
@@ -157,6 +186,7 @@ class Servers
 
   def launch(count=1, options={})
     prefix = options.delete(:prefix) || "worker"
+    script = options.delete(:script)
     options.reverse_merge!({
         :image_id          => DC::CONFIG['preconfigured_ami_id'],
         :count             => count,
@@ -173,8 +203,25 @@ class Servers
       instance.tag('Name', value: "#{prefix}-#{start+index}" )
       new_nodes << add_node(instance)
     end
-    sleep 5 until new_nodes.none? { |node| !node.ssh_open? }
-    InstanceCollection.new(new_nodes)
+    sleep 5 until new_nodes.none? { |node| !ssh_open?(node) }
+    cache_workers
+    collection = InstanceCollection.new(new_nodes)
+    if script
+      collection.execute(script)
+    end
+    collection
+  end
+  def ssh_open?(node)
+    Timeout::timeout(1) do
+      begin
+        TCPSocket.new(node.address, 22).close
+        true
+      rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH
+        false
+      end
+    end
+  rescue Timeout::Error
+    false
   end
 
 
