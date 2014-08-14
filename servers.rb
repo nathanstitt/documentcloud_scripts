@@ -146,23 +146,14 @@ end
 class Servers
   # we should never operate on these
   BLACKLIST  = Regexp.new('^(app|solr|db)')
-  CACHE_FILE = Pathname.new("/tmp/.aws-workers")
   def initialize
     @ec2 = AWS::EC2.new
     @instances = []
-    if CACHE_FILE.exist? && CACHE_FILE.mtime > 3.hours.ago
-      @instances = Marshal.load(CACHE_FILE.read)
-    else
-      @ec2.instances
-        .reject { |i| i.status != :running || i.tags["Name"].blank? || i.tags["Name"].match(BLACKLIST) }
-        .each{ |instance| add_node(instance) }
-      cache_workers
-    end
+    @ec2.instances
+    .reject { |i| i.status != :running || i.tags["Name"].blank? || i.tags["Name"].match(BLACKLIST) }
+    .each{ |instance| add_node(instance) }
   end
 
-  def cache_workers
-#    CACHE_FILE.write Marshal.dump(@instances)
-  end
 
   def add_node(instance)
     node = Node.new(instance.tags["Name"], instance.dns_name, instance )
@@ -203,7 +194,6 @@ class Servers
       new_nodes << add_node(instance)
     end
     sleep 5 until new_nodes.none? { |node| !ssh_open?(node) }
-    cache_workers
     collection = InstanceCollection.new(new_nodes)
     if script
       collection.execute(script)
