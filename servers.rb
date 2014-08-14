@@ -143,7 +143,6 @@ class InstanceCollection
 
 end
 
-
 class Servers
   # we should never operate on these
   BLACKLIST  = Regexp.new('^(app|solr|db)')
@@ -197,10 +196,10 @@ class Servers
       })
     new_instances = @ec2.instances.create(options)
     sleep 1 while new_instances.any? {|i| i.status == :pending }
-    start = instances { |i| i.prefixed?(prefix) }.count + 1
+    start = instances.max_by{|i|i.number}.number + 1
     new_nodes = []
     new_instances.each_with_index do | instance, index |
-      instance.tag('Name', value: "#{prefix}-#{start+index}" )
+      instance.tag('Name', value: sprintf("#{prefix}%02d", prefix, start+index) )
       new_nodes << add_node(instance)
     end
     sleep 5 until new_nodes.none? { |node| !ssh_open?(node) }
