@@ -5,7 +5,7 @@ require 'timeout'
 
 Thread.abort_on_exception = true
 
-class Node < Struct.new(:name, :address, :ec2)
+class Worker < Struct.new(:name, :address, :ec2)
   def prefixed?(prefix)
     !name.match(/^#{prefix}/).nil?
   end
@@ -151,22 +151,22 @@ class Servers
     @instances = []
     @ec2.instances
     .reject { |i| i.status != :running || i.tags["Name"].blank? || i.tags["Name"].match(BLACKLIST) }
-    .each{ |instance| add_node(instance) }
+    .each{ |instance| add_worker(instance) }
   end
 
 
-  def add_node(instance)
-    node = Node.new(instance.tags["Name"], instance.dns_name, instance )
-    @instances.push node
-    node
+  def add_worker(instance)
+    worker = Worker.new(instance.tags["Name"], instance.dns_name, instance )
+    @instances.push worker
+    worker
   end
 
   def instances
-    nodes = @instances.dup
+    workers = @instances.dup
     if block_given?
-      nodes.reject! { |node| ! yield node }
+      workers.reject! { |worker| ! yield worker }
     end
-    InstanceCollection.new(nodes.sort_by{ |node| node.name })
+    InstanceCollection.new(workers.sort_by{ |worker| worker.name })
   end
 
   def workers(range=false)
@@ -188,22 +188,22 @@ class Servers
     new_instances = @ec2.instances.create(options)
     sleep 1 while new_instances.any? {|i| i.status == :pending }
     start = instances.max_by{|i|i.number}.number + 1
-    new_nodes = []
+    new_workers = []
     new_instances.each_with_index do | instance, index |
       instance.tag('Name', value: sprintf("#{prefix}%02d", prefix, start+index) )
-      new_nodes << add_node(instance)
+      new_workers << add_worker(instance)
     end
-    sleep 5 until new_nodes.none? { |node| !ssh_open?(node) }
-    collection = InstanceCollection.new(new_nodes)
+    sleep 5 until new_workers.none? { |worker| !ssh_open?(worker) }
+    collection = InstanceCollection.new(new_workers)
     if script
       collection.execute(script)
     end
     collection
   end
-  def ssh_open?(node)
+  def ssh_open?(worker)
     Timeout::timeout(1) do
       begin
-        TCPSocket.new(node.address, 22).close
+        TCPSocket.new(worker.address, 22).close
         true
       rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH
         false
