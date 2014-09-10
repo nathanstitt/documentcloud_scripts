@@ -1,33 +1,91 @@
-require 'dc/aws'
+require 'nokogiri'
+require 'active_support/all'
 require 'net/ssh'
 require 'socket'
 require 'timeout'
+require 'aws'
+require 'aws/core'
+require 'net/scp'
+
+DC_ROOT   = Pathname.new(__FILE__).dirname.join("../documentcloud")
+SECRETS   = YAML.load_file("#{DC_ROOT}/secrets/secrets.yml")['development']
+SSH_KEY   = DC_ROOT.join('secrets/keys/documentcloud.pem')
+DOC_TYPES = %w{pdf doc docx}
+FIND_DOCS_CLAUSE = DOC_TYPES.map{ |ext| "-name '*.#{ext}'"}.join(" -o ")
+
+AWS.config({
+  :access_key_id     => SECRETS['aws_access_key'],
+  :secret_access_key => SECRETS['aws_secret_key']
+})
+
 
 Thread.abort_on_exception = true
 
+# A Worker is a server that runs jobs on behalf of CloudCrowd
 class Worker < Struct.new(:name, :address, :ec2)
   def prefixed?(prefix)
     !name.match(/^#{prefix}/).nil?
   end
+
   def number
     name[/\d+$/,0].to_i
   end
+
   def reserved?
-    number <= 4
+    false #number > 0 && number <= 4
+  end
+
+  def ssh
+    Net::SSH.start( address, 'ubuntu', keys: SSH_KEY, paranoid: false) do |ssh|
+      yield ssh
+    end
+  end
+
+  def download(src, dest)
+    Net::SCP.download!(address, "ubuntu", src, dest,:ssh=>{ keys: SSH_KEY, paranoid: false } )
+  rescue Net::SCP::Error=>e
+    p e
   end
 
 end
 
+# Contains the execution status of a Job
+class CrowdJob < Struct.new(:node, :pid, :elapsed, :action)
+
+  # Turns the time reported by ps into a Ruby duration
+  # "1:55:59" becomes 1 hour, 55 minutes and 59 seconds
+  def duration
+    @duration ||= calculate_duration
+  end
+
+  def calculate_duration
+    return 0.seconds if ! elapsed
+    parts = elapsed.split(':').map(&:to_i)
+    time = case parts.length
+           when 3 then parts[0].hours   + parts[1].minutes   + parts[2].seconds
+           when 2 then parts[0].minutes + parts[1].seconds
+           else parts[0].seconds
+           end
+    if elapsed=~/(\d+)-/
+      time+=$1.to_i.days
+    end
+    time
+  end
+
+  def work_unit
+    @work_unit ||= action[/\((\d+)\)/,1]
+  end
+
+end
+
+# Contains a subset of available workers
+# Runs commands on them and reports on their health
 class InstanceCollection
   include Enumerable
 
   def initialize(nodes)
     @nodes=nodes
     @hl = HighLine.new
-  end
-
-  def ssh_key
-    Rails.root.join('secrets/keys/documentcloud.pem')
   end
 
   def address_table
@@ -39,34 +97,75 @@ class InstanceCollection
     end
   end
 
-  JobResult = Struct.new(:node,:pid,:run_time,:display_time,:action)
-
   def each
     @nodes.each{ |n| yield n }
   end
 
-  def jobs
+  def idle
+    nodes = []
+    cmd="ps -o pid,etime,cmd --no-headers --ppid `cat tmp/pids/node.pid`|wc -l"
+    execute_on_each(cmd) do |line, success, node, ssh|
+      nodes.push(node)  if 0 == line.to_i
+    end
+    InstanceCollection.new(nodes)
+  end
+
+  def kill_jobs_older_than(time)
+    each_job do |job, ssh|
+      if job.duration > time
+        ssh.exec "kill `pstree -p #{job.pid}|perl -ne 'print \" $1\" while /\\((\\d+)\\)/g'`"
+        sleep 5
+        ssh.exec "kill -9 `pstree -p #{job.pid}|perl -ne 'print \" $1\" while /\\((\\d+)\\)/g'`"
+        @hl.say( @hl.color "Killing #{job.action} on #{job.node.name}", HighLine::RED)
+      end
+    end
+  end
+
+  def docs_running_longer_than(time, dest_directory)
+    results = {}
+    log = File.open("#{dest_directory}/#{Time.now.strftime('%Y%m%dT%H%M')}.txt","w")
+    puts "Logging to #{log.path}"
+    each_job do |job, ssh|
+      next unless job.duration > time
+      directory = ssh.exec!("find /tmp -type d -name unit_#{job.work_unit}").to_s.chomp
+      if directory.empty?
+        @hl.say( @hl.color "Failed to find working directory for #{job}", HighLine::RED)
+        next
+      end
+      doc = ssh.exec!("find #{directory} #{FIND_DOCS_CLAUSE}").to_s.chomp
+      if doc.empty?
+        @hl.say( @hl.color "Failed find to working file for #{job}", HighLine::RED)
+        next
+      end
+      save_path = "#{dest_directory}/#{job.work_unit}-#{File.basename(doc)}"
+      job.node.download( doc, save_path )
+      results[job.work_unit] = save_path
+      status = "%2s %8s %10s %s" % [job.node.number, job.work_unit, job.elapsed, save_path]
+      log.write(status + "\n")
+      puts status
+    end
+    select_cmd = "select j.id as job_id, w.id as work_unit_id, j.action, j.options from jobs j join work_units w on w.job_id = j.id and w.id in(#{results.keys.join(',')})"
+    puts select_cmd
+    results
+  end
+
+  def job_status
+    jobs = []
+    each_job { |job,ssh| jobs<<job}
+    jobs.sort_by{ |job| job.duration }.map do | r |
+      sprintf("%-10s %-15s %8s %s", r.node.name, r.elapsed, r.pid, r.action)
+    end
+  end
+
+  def each_job
     cmd="ps -o pid,etime,cmd --no-headers --ppid `cat tmp/pids/node.pid`"
-    results = []
-    execute_on_each(cmd) do |line, success, node|
-      match=line.match(/\s*(\d+)\s*(\S+)\s(.*)/)
+    execute_on_each(cmd) do |line, success, node, ssh|
+      match = line.match(/\s*(\d+)\s*(\S+)\s(.*)/)
       if ! match
         @hl.say( @hl.color "#{line} failed to match", HighLine::RED)
         next
       end
-      tp = match[2].split(':').map(&:to_i)
-      time = case tp.length
-             when 3 then tp[0].hours   + tp[1].minutes   + tp[2].seconds
-             when 2 then tp[0].minutes + tp[1].seconds
-             else tp[0].seconds
-             end
-      if match[2]=~/(\d+)-/
-        time+=$1.to_i.days
-      end
-      results << JobResult.new(node, match[1], time, match[2], match[3])
-    end
-    results.sort{ |a,b| a.run_time <=> b.run_time }.map do | r |
-      sprintf("%-10s %-15s %8s %s",r.node.name, r.display_time, r.pid, r.action)
+      yield CrowdJob.new(node, match[1], match[2], match[3]), ssh
     end
   end
 
@@ -92,7 +191,7 @@ class InstanceCollection
     threads = []
     each do | node |
       threads << Thread.new do
-        Net::SSH.start( node.address, 'ubuntu', keys: ssh_key, paranoid: false) do |ssh|
+        node.ssh do | ssh |
           prefix =<<-EOS.strip_heredoc
           source /usr/local/share/chruby/chruby.sh
           source /usr/local/share/chruby/auto.sh
@@ -101,7 +200,7 @@ class InstanceCollection
           EOS
           ssh.exec!(prefix + cmd) do | channel, stream, data |
             data.each_line do | line |
-              yield line, (channel==:stdout), node
+              yield line, (channel==:stdout), node, ssh
             end
           end
         end
@@ -128,7 +227,7 @@ class InstanceCollection
           EOS
           end
           script << <<-EOS.strip_heredoc
-          do script "ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -l ubuntu -i #{ssh_key} #{node.address}"  in frontWindow
+          do script "ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -l ubuntu -i #{SSH_KEY} #{node.address}"  in frontWindow
           do script "export PS1=\\\"[\\\\033]0;#{node.name}\\\\007]\\\\u@\\\\h:\\\\w>\\\"" in frontWindow
           do script "cd ~/documentcloud" in frontWindow
         EOS
@@ -178,19 +277,19 @@ class Servers
     prefix = options.delete(:prefix) || "worker"
     script = options.delete(:script)
     options.reverse_merge!({
-        :image_id          => DC::CONFIG['preconfigured_ami_id'],
+        :image_id          => 'ami-86d404ee',
         :count             => count,
         :security_groups   => ['default'],
         :key_name          => 'DocumentCloud 2014-04-12',
         :instance_type     => 'c3.large',
-        :availability_zone => DC::CONFIG['aws_zone']
+        :availability_zone => 'us-east-1c'
       })
     new_instances = @ec2.instances.create(options)
     sleep 1 while new_instances.any? {|i| i.status == :pending }
     start = instances.max_by{|i|i.number}.number + 1
     new_workers = []
     new_instances.each_with_index do | instance, index |
-      instance.tag('Name', value: sprintf("#{prefix}%02d", prefix, start+index) )
+      instance.tag('Name', value: sprintf("%s%02d", prefix, start+index) )
       new_workers << add_worker(instance)
     end
     sleep 5 until new_workers.none? { |worker| !ssh_open?(worker) }
